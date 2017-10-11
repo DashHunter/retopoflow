@@ -69,11 +69,14 @@ class  CGC_Contours(ModalOperator, Contours_UI_Draw):
         if context.space_data.viewport_shade in {'WIREFRAME','BOUNDBOX'}:
             showErrorMessage('Viewport shading must be at least SOLID')
             return False
-        elif context.mode == 'EDIT_MESH' and self.settings.source_object == '':
+        if context.mode == 'EDIT_MESH' and self.settings.source_object == '':
             showErrorMessage('Must specify a Source Object')
             return False
+        if context.mode == 'EDIT_MESH' and get_source_object() == context.active_object:
+            showErrorMessage('Cannot use %s when editing the source object' % (self.bl_label))
+            return False
 
-        elif context.mode == 'OBJECT' and self.settings.source_object == '' and not context.active_object:
+        if context.mode == 'OBJECT' and self.settings.source_object == '' and not context.active_object:
             showErrorMessage('Must select an object or specifiy a Source Object')
             return False
 
@@ -83,6 +86,9 @@ class  CGC_Contours(ModalOperator, Contours_UI_Draw):
 
         if get_source_object().type != 'MESH':
             showErrorMessage('Source must be a mesh object')
+            return False
+        if len(get_source_object().data.polygons) <= 0:
+            showErrorMessage('Source must have at least one face')
             return False
 
         if get_target_object().type != 'MESH':
@@ -171,7 +177,7 @@ class  CGC_Contours(ModalOperator, Contours_UI_Draw):
                 return ''
             elif eventd['press'] in self.keymap['up count']:
                 n = len(self.contours.sel_loop.verts_simple)
-                self.contours.loop_nverts_change(context, eventd, n+1)    
+                self.contours.loop_nverts_change(context, eventd, n+1)
                 return ''
             elif eventd['press'] in self.keymap['dn count']:
                 n = len(self.contours.sel_loop.verts_simple)

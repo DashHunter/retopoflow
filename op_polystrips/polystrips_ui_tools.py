@@ -29,6 +29,7 @@ import math
 
 from ..lib import common_utilities
 from ..lib.common_utilities import bversion, get_object_length_scale, dprint, frange, selection_mouse, showErrorMessage
+from ..lib.common_utilities import invert_matrix, matrix_normal
 from ..lib.classes.profiler import profiler
 from ..cache import mesh_cache
 
@@ -73,7 +74,7 @@ class Polystrips_UI_Tools():
                     self.sketch = []
                     return 'main'
 
-            p3d = common_utilities.ray_cast_stroke_bvh(eventd['context'], mesh_cache['bvh'], self.mx, self.sketch) if len(self.sketch) > 1 else []
+            p3d = common_utilities.raycast_stroke_bvh_norm(eventd['context'], mesh_cache['bvh'], self.mx, self.sketch) if len(self.sketch) > 1 else []
             if len(p3d) <= 1: return 'main'
 
             # tessellate stroke (if needed) so we have good stroke sampling
@@ -81,7 +82,6 @@ class Polystrips_UI_Tools():
             # p3d = [(p0+(p1-p0).normalized()*x) for p0,p1 in zip(p3d[:-1],p3d[1:]) for x in frange(0,(p0-p1).length,length_tess)] + [p3d[-1]]
             # stroke = [(p,self.stroke_radius) for i,p in enumerate(p3d)]
 
-            self.sketch = []
             
             if settings.symmetry_plane == 'x':
                 while p3d:
@@ -90,7 +90,7 @@ class Polystrips_UI_Tools():
                         if p[0].x < 0.0:
                             next_i_p = i_p
                             break
-                    self.polystrips.insert_gedge_from_stroke(p3d[:next_i_p], False)
+                    self.polystrips.insert_gedge_from_stroke(p3d[:next_i_p])
                     p3d = p3d[next_i_p:]
                     next_i_p = len(p3d)
                     for i_p,p in enumerate(p3d):
@@ -99,11 +99,12 @@ class Polystrips_UI_Tools():
                             break
                     p3d = p3d[next_i_p:]
             else:
-                self.polystrips.insert_gedge_from_stroke(p3d, False)
+                self.polystrips.insert_gedge_from_stroke(p3d)
             
             self.polystrips.remove_unconnected_gverts()
             #self.polystrips.update_visibility(eventd['r3d'])
 
+            self.sketch = []
             self.act_gvert = None
             self.act_gedge = None
             self.act_gpatch = None
@@ -124,12 +125,12 @@ class Polystrips_UI_Tools():
         region = eventd['region']
         r3d = eventd['r3d']
         
-        mx = self.obj_orig.matrix_world
-        mx3x3 = mx.to_3x3()
-        imx = mx.inverted()
+        src_mx = self.obj_orig.matrix_world
+        src_imx = invert_matrix(src_mx)
+        tar_mx = self.dest_obj.matrix_world
+        tar_imx = invert_matrix(tar_mx)
         
-        ray,hit = common_utilities.ray_cast_region2d_bvh(region, r3d, eventd['mouse'], mesh_cache['bvh'],mx, settings)
-        hit_p3d,hit_norm,hit_idx = hit
+        hit_p3d,hit_norm = self.src_bmc.raycast_screen(eventd['mouse'], region, r3d)
         if not hit_p3d:
             self.tweak_data = {
                 'mouse': eventd['mouse'],
@@ -139,13 +140,14 @@ class Polystrips_UI_Tools():
                 'lgpmove': [],
                 'lmverts': [],
                 'supdate': set(),
-                'mx': mx,
-                'mx3x3': mx3x3,
-                'imx': imx,
+                'src_mx': src_mx,
+                'src_imx': src_imx,
+                'tar_mx': tar_mx,
+                'tar_imx': tar_imx,
             }
             return
         
-        hit_p3d = mx * hit_p3d
+        #hit_p3d = tar_imx * hit_p3d
         
         lgvmove = []  #GVert
         lgvextmove = []  #GVerts  and BMVert 
@@ -155,12 +157,19 @@ class Polystrips_UI_Tools():
         lallverts = [] # all vertex positions (for relaxing)
         supdate = set()
         
+        # existing geometry
         for i_mv,mv in enumerate(self.dest_bme.verts):
-            d = (mx*mv.co-hit_p3d).length / self.stroke_radius
+            d = (mv.co-tar_imx*hit_p3d).length / self.stroke_radius
             if not d < max_dist:
                 continue
-            lmverts.append((i_mv,mx *mv.co,d))
-            lallverts.append(mx*mv.co)
+            lmverts.append((i_mv,tar_mx*mv.co,d))
+            lallverts.append(tar_mx*mv.co)
+        for gv in self.polystrips.extension_geometry:
+            lcorners = gv.get_corners()
+            ld = [(c-hit_p3d).length / self.stroke_radius for c in lcorners]
+            if not any(d < max_dist for d in ld):
+                continue
+            lgvextmove += [(gv,ic,c,d) for ic,c,d in zip([0,1,2,3], lcorners, ld) if d < max_dist]
         
         for gv in self.polystrips.gverts:
             lcorners = gv.get_corners()
@@ -179,13 +188,6 @@ class Polystrips_UI_Tools():
                 for ges in ge.gedgeseries:
                     if ges.gpatch:
                         supdate.add(ges.gpatch)
-        
-        for gv in self.polystrips.extension_geometry:
-            lcorners = gv.get_corners()
-            ld = [(c-hit_p3d).length / self.stroke_radius for c in lcorners]
-            if not any(d < max_dist for d in ld):
-                continue
-            lgvextmove += [(gv,ic,c,d) for ic,c,d in zip([0,1,2,3], lcorners, ld) if d < max_dist]
         
         for ge in self.polystrips.gedges:
             for i,gv in ge.iter_igverts():
@@ -231,9 +233,10 @@ class Polystrips_UI_Tools():
             'lgpmove': lgpmove,
             'lmverts': lmverts,
             'supdate': supdate,
-            'mx': mx,
-            'mx3x3': mx3x3,
-            'imx': imx,
+            'src_mx':  src_mx,
+            'src_imx': src_imx,
+            'tar_mx':  tar_mx,
+            'tar_imx': tar_imx,
         }
         
     
@@ -256,22 +259,20 @@ class Polystrips_UI_Tools():
             dx,dy = cx-lx,cy-ly
             dv = Vector((dx,dy))
             
-            mx = self.tweak_data['mx']
-            mx3x3 = self.tweak_data['mx3x3']
-            imx = self.tweak_data['imx']
+            src_mx,src_imx = self.tweak_data['src_mx'],self.tweak_data['src_imx']
+            tar_mx,tar_imx = self.tweak_data['tar_mx'],self.tweak_data['tar_imx']
             
             def update(p3d, d):
                 if d >= 1.0: return p3d
                 p2d = location_3d_to_region_2d(region, r3d, p3d)
                 p2d += dv * (1.0-d)
-                hit = common_utilities.ray_cast_region2d_bvh(region, r3d, p2d, mesh_cache['bvh'], mx, settings)[1]
-                if hit[2] == None: return p3d
-                return mx * hit[0]
+                hit_p3d,_ = self.src_bmc.raycast_screen(p2d, region, r3d)
+                return hit_p3d or p3d
 
             vertices = self.dest_bme.verts
             for i_v,c,d in self.tweak_data['lmverts']:
                 nc = update(c,d)
-                vertices[i_v].co = imx * nc
+                vertices[i_v].co = tar_imx * nc
             
             for gv,ic,c,d in self.tweak_data['lgvextmove']:
                 if ic == 0:
@@ -340,22 +341,21 @@ class Polystrips_UI_Tools():
             lx,ly = self.tweak_data['mouse']
             dx,dy = cx-lx,cy-ly #< -- is this right?
             dv = Vector((dx,dy))  #< -- is this right!?
-            mx = self.tweak_data['mx']
-            mx3x3 = self.tweak_data['mx3x3']
-            imx = self.tweak_data['imx']
+            src_mx = self.tweak_data['src_mx']
+            src_imx = self.tweak_data['src_imx']
             
             def update(p3d, d):
                 if d >= 1.0: return p3d
                 p2d = location_3d_to_region_2d(region, r3d, p3d)
                 p2d += dv * (1.0-d)
-                hit = common_utilities.ray_cast_region2d_bvh(region, r3d, p2d, mesh_cache['bvh'],mx, settings)[1]
+                hit = common_utilities.ray_cast_region2d_bvh(region, r3d, p2d, mesh_cache['bvh'],src_mx, settings)[1]
                 if hit[2] == None: return p3d
                 return mx * hit[0]
             
             vertices = self.dest_bme.verts
             for i_v,c,d in self.tweak_data['lmverts']:
                 nc = update(c,d)
-                vertices[i_v].co = imx * nc
+                vertices[i_v].co = src_imx * nc
                 print('update_edit_mesh')
             
             for gv,ic,c,d in self.tweak_data['lgvextmove']:

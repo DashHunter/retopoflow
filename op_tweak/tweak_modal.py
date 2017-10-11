@@ -28,12 +28,15 @@ from mathutils import Vector, Matrix, Quaternion
 import math
 
 from ..lib import common_drawing_px
+from ..lib.common_utilities import get_source_object, get_target_object, setup_target_object
 from ..lib.common_utilities import iter_running_sum, dprint, get_object_length_scale
-from ..lib.common_utilities import showErrorMessage
+from ..lib.common_utilities import invert_matrix, matrix_normal
+from ..lib.common_utilities import showErrorMessage, get_source_object, get_target_object
 from ..lib.common_drawing_bmesh import BMeshRender
 from ..lib.classes.profiler import profiler
 from .tweak_ui import Tweak_UI
 from .tweak_ui_tools import Tweak_UI_Tools
+from mathutils.bvhtree import BVHTree
 
 from ..modaloperator import ModalOperator
 
@@ -68,13 +71,23 @@ class CGC_Tweak(ModalOperator, Tweak_UI, Tweak_UI_Tools):
 
         if context.mode != 'EDIT_MESH':
             showErrorMessage('Must be in Edit Mode')
-
-        if context.mode == 'EDIT_MESH' and not self.settings.source_object:
+        if not self.settings.source_object:
             showErrorMessage('Must specify a Source Object')
             return False
-        
+
+        if get_source_object() == context.active_object:
+            showErrorMessage('Cannot use %s when editing the source object' % (self.bl_label))
+            return False
+
         if context.object.type != 'MESH':
             showErrorMessage('Must select a mesh object')
+            return False
+        
+        if get_source_object().type != 'MESH':
+            showErrorMessage('Source must be a mesh object')
+            return False
+        if len(get_source_object().data.polygons) <= 0:
+            showErrorMessage('Source must have at least one face')
             return False
         
         return True
@@ -84,7 +97,9 @@ class CGC_Tweak(ModalOperator, Tweak_UI, Tweak_UI_Tools):
 
         # Setup target for BmeshRender drawing of existing geometry
         self.tar_bmesh = bmesh.from_edit_mesh(context.object.data)
-        self.tar_bmeshrender = BMeshRender(self.tar_bmesh, context.object.matrix_world)
+        bvh = BVHTree.FromBMesh(self.tar_bmesh)
+        #target_bmesh, target_mx, source_bvh, source_mx
+        self.tar_bmeshrender = BMeshRender(self.tar_bmesh, get_target_object().matrix_world, bvh, context.object.matrix_world)
 
         # Hide any existing geometry
         bpy.ops.mesh.hide(unselected=True)
@@ -121,10 +136,14 @@ class CGC_Tweak(ModalOperator, Tweak_UI, Tweak_UI_Tools):
         ### Existing Geometry ###
         opts = {
             'poly color': (color_frozen[0], color_frozen[1], color_frozen[2], 0.20),
-            'poly depth': (0, 0.999),
+            'poly depth': (0, 0.998),
+            'poly offset': 0.000001,
+            'poly dotoffset': 0.001,
 
             'line depth': (0, 0.997),
             'line color': (color_frozen[0], color_frozen[1], color_frozen[2], 1.00),
+            'line offset': 0.000002,
+            'line dotoffset': 0.002,
         }
         self.tar_bmeshrender.draw(opts)
 
@@ -156,14 +175,8 @@ class CGC_Tweak(ModalOperator, Tweak_UI, Tweak_UI_Tools):
             self.sketch_brush.draw(context, color=(1, 1, 1, .5), linewidth=1, color_size=(1, 1, 1, 1))
         elif not self.is_navigating:
             # draw the brush oriented to surface
-            d, hit = common_utilities.ray_cast_region2d_bvh(region, r3d, self.cur_pos, mesh_cache['bvh'], self.mx, settings)
-            
-            hit_p3d,hit_norm,hit_idx = hit
-            if hit_p3d != None:
-                mx = self.mx
-                mxnorm = mx.transposed().inverted().to_3x3()
-                hit_p3d = mx * hit_p3d
-                hit_norm = mxnorm * hit_norm
+            hit_p3d,hit_norm = self.src_bmc.raycast_screen(self.cur_pos, region, r3d)
+            if hit_p3d:
                 common_drawing_px.draw_circle(context, hit_p3d, hit_norm.normalized(), self.stroke_radius, (1,1,1,.5))
     
     def modal_wait(self, context, eventd):

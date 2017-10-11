@@ -68,7 +68,9 @@ class Contours(object):
         if context.mode == 'OBJECT':
             self.mesh_data_gather_object_mode(context)
         elif 'EDIT' in context.mode:
-            self.mesh_data_gather_edit_mode(context) 
+            self.mesh_data_gather_edit_mode(context)
+        
+        self.dest_xray = self.dest_obj.show_x_ray
             
         #potential item for snapping in 
         self.snap = []
@@ -124,6 +126,7 @@ class Contours(object):
             me.update()
             bme = bmesh.new()
             bme.from_mesh(me)
+            bmesh.ops.triangulate(bme, faces=bme.faces[:])
             bvh = BVHTree.FromBMesh(bme)
             write_mesh_cache(self.obj_orig,bme, bvh)
          
@@ -152,6 +155,7 @@ class Contours(object):
             
             bme = bmesh.new()
             bme.from_mesh(me)
+            bmesh.ops.triangulate(bme, faces=bme.faces[:])
             bvh = BVHTree.FromBMesh(bme)
             write_mesh_cache(self.obj_orig, bme, bvh)
         
@@ -229,22 +233,12 @@ class Contours(object):
             self.dest_obj.select = True
             context.scene.objects.active = self.dest_obj
 
-            self.dest_obj.show_x_ray = self.settings.use_x_ray
-
-            if context.space_data.local_view:
-                view_loc = context.space_data.region_3d.view_location.copy()
-                view_rot = context.space_data.region_3d.view_rotation.copy()
-                view_dist = context.space_data.region_3d.view_distance
-                bpy.ops.view3d.localview()
-                bpy.ops.view3d.localview()
-                #context.space_data.region_3d.view_matrix = mx_copy
-                context.space_data.region_3d.view_location = view_loc
-                context.space_data.region_3d.view_rotation = view_rot
-                context.space_data.region_3d.view_distance = view_dist
-                context.space_data.region_3d.update()
+            common_utilities.toggle_localview()
             
             common_utilities.default_target_object_to_active()
-    
+        
+        self.dest_obj.show_x_ray = self.dest_xray
+        
         return
     
     def create_undo_snapshot(self, action):
@@ -462,7 +456,7 @@ class Contours(object):
         rv3d = context.space_data.region_3d
         d, hit = common_utilities.ray_cast_region2d_bvh(context.region, rv3d, (x,y), mesh_cache['bvh'], self.mx, settings)
         if hit[0]:
-            loc = self.mx * hit[0] #< it's ok if this is none
+            loc = hit[0] # self.mx * hit[0] #< it's ok if this is none
         else:
             loc = None
             
@@ -566,7 +560,7 @@ class Contours(object):
         rv3d = context.space_data.region_3d
         d, hit = common_utilities.ray_cast_region2d_bvh(context.region, rv3d, (x,y), mesh_cache['bvh'], self.mx, settings)
         if hit[0]:
-            loc = self.mx * hit[0] #< it's ok if this is none
+            loc = hit[0] # self.mx * hit[0] #< it's ok if this is none
         else:
             loc = None
         #identify hover target for highlighting
@@ -617,7 +611,10 @@ class Contours(object):
                         #c_cut.geom_color = (settings.geom_rgb[0],settings.geom_rgb[1],settings.geom_rgb[2],1)          
             if not target_at_all:
                 self.hover_target = None
-                self.cut_line_widget = None    
+                self.cut_line_widget = None
+        else:
+            self.hover_target = None
+            self.cut_line_widget = None
 
     #### Non Interactive/Non Data Operators###
     
@@ -730,13 +727,16 @@ class Contours(object):
         if undo:
             self.create_undo_snapshot('LOOP_SHIFT')
             
-        self.sel_loop.shift += shift * (-1 + 2 * up)
+        self.sel_loop.shift = (self.sel_loop.shift + shift * (-1 + 2 * up)) % len(self.sel_loop.verts_simple)
         self.sel_loop.simplify_cross(self.sel_path.ring_segments)
+        
+        #print('shift = %f, %d, %d' % (self.sel_loop.shift,len(self.sel_loop.verts),len(self.sel_loop.verts_simple)))
         
         for path in self.cut_paths:
             if self.sel_loop in path.cuts:
                 path.connect_cuts_to_make_mesh(mesh_cache['bvh'], self.mx)
                 path.update_backbone(context, mesh_cache['bme'], mesh_cache['bvh'], self.mx, self.sel_loop, insert = False)
+        
                
     def loop_nverts_change(self, context, eventd, n):
         if n < 3:
@@ -820,6 +820,8 @@ class Contours(object):
             
         self.sel_path = None
         self.sel_loop = None
+        self.hover_target = None
+        self.cut_line_widget = None
     
     
     ####Interactive/Modal Operators
@@ -892,6 +894,7 @@ class Contours(object):
         self.sel_loop.simplify_cross(self.sel_path.ring_segments)
         self.sel_loop.update_com()  
         self.sel_path.connect_cuts_to_make_mesh(mesh_cache['bvh'], self.mx)
+        self.undo_action()
 
     
     def draw_post_pixel(self,context):
@@ -2830,7 +2833,7 @@ class ContourCutLine(object):
                 self.head.world_position = region_2d_to_location_3d(region, rv3d, (self.head.x, self.head.y), mx * hit[0])
                 self.tail.world_position = region_2d_to_location_3d(region, rv3d, (self.tail.x, self.tail.y), mx * hit[0])
                 
-                self.plane_pt = mx * hit[0]
+                self.plane_pt = hit[0] # mx * hit[0]
                 self.seed_face_index = hit[2]
 
                 if settings.use_perspective:
